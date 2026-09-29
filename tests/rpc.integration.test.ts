@@ -11,7 +11,7 @@ import { PiRpcRuntime } from "../src/runtime/pi-rpc-runtime.js";
 import { SessionStore } from "../src/sessions/store.js";
 
 const cliPath = fileURLToPath(new URL("./cli.js", import.meta.resolve("@earendil-works/pi-coding-agent")));
-const extensionPath = resolve("src/index.ts");
+const extensionPath = process.env.SLAVER_TEST_EXTENSION_PATH ?? resolve("src/index.ts");
 const folders: string[] = [];
 const servers: Server[] = [];
 const previousDir = process.env.PI_CODING_AGENT_DIR;
