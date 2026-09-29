@@ -1,0 +1,50 @@
+# pi-slaver
+
+A small Pi extension for one-at-a-time, blocking delegation to isolated, read-only `scout` and `reviewer` child processes. Validated against `@earendil-works/pi-coding-agent` 0.86.0.
+
+## Install from GitHub
+
+Requires Pi, Node.js >=22.19, and SSH access to `git@github.com:alduraimron/slaver.git`.
+
+```sh
+pi install git:git@github.com:alduraimron/slaver.git
+```
+
+Restart Pi (or run `/reload`) after installation. The extension registers the `delegate` tool automatically. To update an unpinned Git install, run `pi update --extensions`. To remove it, run `pi remove git:git@github.com:alduraimron/slaver.git`.
+
+For local development instead:
+
+```sh
+npm install --ignore-scripts
+pi -e ./src/index.ts
+```
+
+You can also install the checkout as a local Pi package with `pi install .` from this directory.
+
+The main agent gets one tool:
+
+```text
+delegate({ agent: "scout" | "reviewer", task: "...", context?: "..." })
+```
+
+It waits for a terminal outcome, returned as JSON with `id`, `agent`, and `status` (`completed`, `failed`, or `cancelled`). A successful result has `result`; a failure has a typed `error`. The full child event stream never enters the parent model context. Use `/subagents` to list delegated sessions, `/subagents <id>` to inspect one, and `/cancel-subagent [id]` to cancel the active child. Session metadata is also saved as non-model-context Pi entries when the host session is persisted.
+
+## Behavior and boundaries
+
+- Each task starts a fresh Pi RPC child in the host working directory, with no copied parent transcript.
+- The default child model and thinking level come from the host. An agent definition may override the model with a `provider/model` ID and set a Pi-supported thinking level. A model override without a thinking override defaults to `off` to avoid inheriting an unsupported level. An unavailable or incompatible model fails rather than silently falling back.
+- Child tools are exactly `read`, `grep`, `find`, and `ls`. `bash`, `powershell`, `write`, `edit`, extension tools, and recursive delegation are unavailable. This is a Pi tool-capability boundary, **not** an OS-level filesystem sandbox. Project `AGENTS.md` instructions remain available to the child.
+- Only one delegation may run at a time. A timeout fails the run, while host abort and explicit cancellation cancel it. All terminal paths stop the child process.
+- Agent definition files are packaged in `agents/`; V0 does not load arbitrary project-defined agent roles.
+
+## Develop and verify
+
+```sh
+npm run typecheck
+npm test
+npm run test:integration
+```
+
+Integration tests use real Pi RPC processes and a local fake OpenAI-compatible endpoint. They need no external model credentials. They cover Scout, Reviewer, failure, cancellation, tool restrictions, parent continuation, and session inspection after restart.
+
+Normative scope and architecture: [`docs/V0_SCOPE.md`](docs/V0_SCOPE.md), [`docs/AGENT_MODEL.md`](docs/AGENT_MODEL.md), [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
