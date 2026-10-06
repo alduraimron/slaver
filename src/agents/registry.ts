@@ -4,11 +4,11 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { AgentDefinition, AgentName, ResolvedAgentDefinition } from "./types.js";
+import { IMPLEMENTER_TOOLS, type AgentDefinition, type AgentName, type ResolvedAgentDefinition } from "./types.js";
 
 const READ_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const THINKING = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
-const AGENTS = new Set<AgentName>(["scout", "reviewer"]);
+const AGENTS = new Set<AgentName>(["scout", "reviewer", "implementer"]);
 
 export class DefinitionError extends Error {
   constructor(message: string) {
@@ -19,7 +19,7 @@ export class DefinitionError extends Error {
 
 export class UnknownAgentError extends Error {
   constructor(name: string) {
-    super(`Unknown agent "${name}". Available agents: scout, reviewer.`);
+    super(`Unknown agent "${name}". Available agents: scout, reviewer, implementer.`);
     this.name = "UnknownAgentError";
   }
 }
@@ -37,19 +37,24 @@ export function parseDefinition(content: string, source: string): AgentDefinitio
   const allowed = new Set(["name", "description", "model", "thinking", "tools", "canDelegate", "timeoutMs"]);
   for (const key of Object.keys(frontmatter)) if (!allowed.has(key)) fail(`unknown field "${key}"`);
   const { name, description, model, thinking, tools, canDelegate, timeoutMs } = frontmatter;
-  if (typeof name !== "string" || !AGENTS.has(name as AgentName)) fail("name must be scout or reviewer");
+  if (typeof name !== "string" || !AGENTS.has(name as AgentName)) fail("name must be scout, reviewer or implementer");
   if (typeof description !== "string" || !description.trim()) fail("description must be non-empty");
   if (!body.trim()) fail("instructions must be non-empty Markdown body");
   if (model !== undefined && (typeof model !== "string" || !/^[^\s/]+\/[^\s]+$/.test(model))) {
     fail("model must be a provider/model ID");
   }
   if (thinking !== undefined && (typeof thinking !== "string" || !THINKING.has(thinking))) fail("invalid thinking level");
-  if (!Array.isArray(tools) || tools.length === 0 || tools.some(t => typeof t !== "string" || !READ_TOOLS.has(t))) {
-    fail("tools must be a non-empty array containing only read, grep, find, ls");
+  const permitted = name === "implementer" ? new Set(IMPLEMENTER_TOOLS) : READ_TOOLS;
+  if (!Array.isArray(tools) || tools.length === 0 || tools.some(t => typeof t !== "string" || !permitted.has(t))) {
+    fail(name === "implementer" ? "implementer tools must be read-only tools or scoped_edit/scoped_write" :
+      "tools must be a non-empty array containing only read, grep, find, ls");
+  }
+  if (name === "implementer" && !["read", "scoped_edit", "scoped_write"].every(t => (tools as string[]).includes(t))) {
+    fail("implementer requires read, scoped_edit and scoped_write");
   }
   const toolNames = tools as string[];
   if (new Set(toolNames).size !== toolNames.length) fail("duplicate tools");
-  if (canDelegate !== false) fail("canDelegate must be false in V0");
+  if (canDelegate !== false) fail("canDelegate must be false");
   if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || (timeoutMs as number) <= 0)) {
     fail("timeoutMs must be a positive integer");
   }

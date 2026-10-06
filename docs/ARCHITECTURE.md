@@ -1,5 +1,10 @@
 # Architecture
 
+The shared V0 architecture below remains in place. [V1_IMPLEMENTER.md](V1_IMPLEMENTER.md) specifies the
+approved-scope writable addition: the manager freezes an approved run, the runtime explicitly loads a
+scoped-tool guard only for implementer and verifies readiness before prompting. Other children remain
+read-only; no scheduler, shell runner, project-defined roles or recursive delegation is added.
+
 ## 1. Summary
 
 V0 is a standalone Pi extension that delegates a bounded task to a separate Pi child process.

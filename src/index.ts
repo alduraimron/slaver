@@ -28,18 +28,19 @@ export default function (pi: ExtensionAPI): void {
   pi.registerTool({
     name: "delegate",
     label: "Delegate",
-    description: "Delegate one bounded, read-only investigation to scout or independent review to reviewer. Waits for a terminal result.",
+    description: "Delegate one bounded investigation to scout, review to reviewer, or approved-scope coding to implementer. Implementer requires runPath after explicit ACC; it cannot run commands. Waits for a terminal result.",
     parameters: Type.Object({
-      agent: StringEnum(["scout", "reviewer"] as const),
+      agent: StringEnum(["scout", "reviewer", "implementer"] as const),
       task: Type.String({ minLength: 1, description: "Specific question or change to review" }),
       context: Type.Optional(Type.String({ description: "Small, task-specific context; not a transcript" })),
       constraints: Type.Optional(Type.Array(Type.String())),
       expectedOutput: Type.Optional(Type.String()),
+      runPath: Type.Optional(Type.String({ minLength: 1, description: "Implementer only: approved .pi/stapler/runs/<file>.json. Scope and acceptance are loaded from this file, not task text." })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       const outcome = await manager.delegate({
         agent: params.agent,
-        task: { prompt: params.task, context: params.context, constraints: params.constraints, expectedOutput: params.expectedOutput },
+        task: { prompt: params.task, context: params.context, constraints: params.constraints, expectedOutput: params.expectedOutput, runPath: params.runPath },
         parentId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd,
         model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "",
         thinking: ctx.thinkingLevel ?? "off", signal,

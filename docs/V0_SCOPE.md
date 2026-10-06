@@ -1,5 +1,9 @@
 # V0 Scope
 
+Historical V0 baseline. The explicitly approved writable implementer is specified separately in
+[V1_IMPLEMENTER.md](V1_IMPLEMENTER.md); its addition does not widen Scout/Reviewer capabilities or the
+other V0 non-goals.
+
 ## Goal
 
 Prove that Pi can support useful, isolated, specialized child agents without building a general multi-agent framework.

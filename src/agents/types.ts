@@ -1,6 +1,7 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 
-export type AgentName = "scout" | "reviewer";
+export type AgentName = "scout" | "reviewer" | "implementer";
+export const IMPLEMENTER_TOOLS: readonly string[] = ["read", "grep", "find", "ls", "scoped_edit", "scoped_write"];
 
 export interface AgentDefinition {
   name: AgentName;
@@ -24,4 +25,5 @@ export interface DelegatedTask {
   context?: string;
   constraints?: string[];
   expectedOutput?: string;
+  runPath?: string;
 }

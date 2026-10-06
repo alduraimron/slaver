@@ -1,5 +1,5 @@
 import { createServer, type Server } from "node:http";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -9,6 +9,7 @@ import { AgentManager } from "../src/manager.js";
 import { PiRpcRuntime } from "../src/runtime/pi-rpc-runtime.js";
 import { resolvePiCliPath } from "../src/runtime/pi-cli.js";
 import { SessionStore } from "../src/sessions/store.js";
+import { approvedRun, APPROVED_RUN } from "./implementation-fixture.js";
 
 const cliPath = process.env.SLAVER_TEST_CLI_PATH ? resolve(process.env.SLAVER_TEST_CLI_PATH) : resolvePiCliPath();
 const extensionPath = process.env.SLAVER_TEST_EXTENSION_PATH ?? resolve("src/index.ts");
@@ -26,9 +27,11 @@ afterEach(async () => {
   else process.env.PI_OFFLINE = previousOffline;
 });
 
-type Mode = "success" | "failure" | "hang";
+type Mode = "success" | "failure" | "hang" | "implement" | "deny-writes" | "implement-hang";
 async function fixture(mode: Mode) {
-  const requests: Array<{ tools?: Array<{ function: { name: string } }> }> = [];
+  const requests: Array<{ messages: Array<{ role: string; content?: string }>; tools?: Array<{ function: { name: string } }> }> = [];
+  let mutationFinished!: () => void;
+  const afterMutation = new Promise<void>(resolve => { mutationFinished = resolve; });
   let childRequested!: () => void;
   const childCall = new Promise<void>(resolve => { childRequested = resolve; });
   const server = createServer(async (req, res) => {
@@ -42,6 +45,10 @@ async function fixture(mode: Mode) {
     const isHost = body.tools?.some(t => t.function.name === "delegate");
     if (!isHost) childRequested();
     if (!isHost && mode === "hang") return;
+    if (!isHost && mode === "implement-hang" && body.messages.some(m => m.role === "tool")) {
+      mutationFinished();
+      return;
+    }
     if (!isHost && mode === "failure") {
       res.writeHead(401, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: { message: "fixture failure", type: "invalid_request_error" } }));
@@ -60,9 +67,26 @@ async function fixture(mode: Mode) {
       send({}, "stop");
     } else if (isHost && !toolResult) {
       send({ role: "assistant" });
-      const role = JSON.stringify(body.messages).includes("reviewer") ? "reviewer" : "scout";
+      const userText = JSON.stringify(latestUser);
+      const role = userText.includes("Use implementer") ? "implementer" : userText.includes("reviewer") ? "reviewer" : "scout";
       send({ tool_calls: [{ index: 0, id: "call-1", type: "function",
-        function: { name: "delegate", arguments: JSON.stringify({ agent: role, task: "Inspect the entry point" }) } }] });
+        function: { name: "delegate", arguments: JSON.stringify({ agent: role, task: "Perform the approved task",
+          ...(role === "implementer" ? { runPath: APPROVED_RUN } : {}) }) } }] });
+      send({}, "tool_calls");
+    } else if (!isHost && ["implement", "deny-writes", "implement-hang"].includes(mode) && !toolResult) {
+      send({ role: "assistant" });
+      const calls = mode === "deny-writes" ? [
+        { name: "scoped_write", args: { path: "outside.ts", content: "forbidden" } },
+        { name: "scoped_write", args: { path: APPROVED_RUN, content: "forbidden" } },
+        { name: "scoped_write", args: { path: "../escape.ts", content: "forbidden" } },
+        { name: "write", args: { path: "native-escape.ts", content: "forbidden" } },
+        { name: "bash", args: { command: "echo forbidden" } },
+      ] : [
+        { name: "scoped_edit", args: { path: "entry.ts", edits: [{ oldText: "export const entry = true;", newText: "export const entry = false;" }] } },
+        { name: "scoped_write", args: { path: "src/new.ts", content: "export const added = true;\n" } },
+      ];
+      send({ tool_calls: calls.map((call, index) => ({ index, id: `write-${index}`, type: "function",
+        function: { name: call.name, arguments: JSON.stringify(call.args) } })) });
       send({}, "tool_calls");
     } else {
       send({ role: "assistant" });
@@ -85,9 +109,10 @@ async function fixture(mode: Mode) {
   } }));
   writeFileSync(join(config, "settings.json"), JSON.stringify({ retry: { enabled: false }, compaction: { enabled: false } }));
   writeFileSync(join(workspace, "entry.ts"), "export const entry = true;\n");
+  approvedRun(workspace);
   process.env.PI_CODING_AGENT_DIR = config;
   process.env.PI_OFFLINE = "1";
-  return { requests, childCall, workspace, config };
+  return { requests, childCall, afterMutation, workspace, config };
 }
 
 function packageCopy(stalePeer: boolean) {
@@ -199,6 +224,75 @@ describe("real Pi RPC process", () => {
       expect(answer).toContain('"status":"completed"');
       const child = requests.find(r => r.tools?.some(t => t.function.name === "read"));
       expect(child?.tools?.map(t => t.function.name).sort()).toEqual(["find", "grep", "ls", "read"]);
+    } finally { await client.stop(); }
+  }, 40_000);
+
+  it.each(["implement", "deny-writes"] as const)("runs guarded implementer through a managed package: %s", async mode => {
+    const { requests, workspace, config } = await fixture(mode);
+    const { root } = packageCopy(false);
+    const originalRun = readFileSync(join(workspace, APPROVED_RUN), "utf8");
+    const client = new RpcClient({ cliPath, cwd: workspace, model: "slaver-test/fixture", env: { PI_CODING_AGENT_DIR: config, PI_OFFLINE: "1" },
+      args: ["--no-session", "--no-extensions", "-e", root, "--tools", "delegate", "--thinking", "off"] });
+    try {
+      await client.start();
+      await client.promptAndWait("Use implementer for the approved task", undefined, 30_000);
+      expect(await client.getLastAssistantText()).toContain('"agent":"implementer"');
+      expect(await client.getLastAssistantText()).toContain('"status":"completed"');
+      const child = requests.find(r => r.tools?.some(t => t.function.name === "scoped_write"));
+      expect(child?.tools?.map(t => t.function.name).sort()).toEqual(["find", "grep", "ls", "read", "scoped_edit", "scoped_write"]);
+      expect(readFileSync(join(workspace, APPROVED_RUN), "utf8")).toBe(originalRun);
+      if (mode === "implement") {
+        expect(readFileSync(join(workspace, "entry.ts"), "utf8")).toContain("entry = false");
+        expect(readFileSync(join(workspace, "src/new.ts"), "utf8")).toContain("added = true");
+      } else {
+        expect(readFileSync(join(workspace, "entry.ts"), "utf8")).toContain("entry = true");
+        expect(existsSync(join(workspace, "outside.ts"))).toBe(false);
+        expect(existsSync(join(workspace, "native-escape.ts"))).toBe(false);
+        expect(existsSync(join(workspace, "src/new.ts"))).toBe(false);
+        expect(JSON.stringify(requests)).toContain("outside approved file scope");
+        expect(JSON.stringify(requests)).toContain("traversal");
+      }
+      await client.promptAndWait("Continue and say ready", undefined, 30_000);
+      expect(await client.getLastAssistantText()).toContain("HOST_READY");
+    } finally { await client.stop(); }
+  }, 40_000);
+
+  it.each(["missing", "inert"])("fails closed before model execution if the implementer guard is %s", async kind => {
+    const { workspace, requests } = await fixture("implement");
+    const guardPath = join(workspace, `${kind}-guard.ts`);
+    if (kind === "inert") writeFileSync(guardPath, "export default function () {}\n");
+    const runtime = new PiRpcRuntime(cliPath, guardPath);
+    const manager = new AgentManager(new AgentRegistry(), new SessionStore(), runtime);
+    const outcome = await manager.delegate({ agent: "implementer", task: { prompt: "Approved task", runPath: APPROVED_RUN },
+      parentId: "host", cwd: workspace, model: "slaver-test/fixture", thinking: "off" });
+    expect(outcome.status).toBe("failed");
+    if (outcome.status === "failed") {
+      expect(outcome.error.code).toBe("rpc_failed");
+      expect(outcome.error.message).toContain("did not become ready");
+    }
+    expect(requests).toHaveLength(0);
+    expect(readFileSync(join(workspace, "entry.ts"), "utf8")).toContain("entry = true");
+    expect(existsSync(join(workspace, "src/new.ts"))).toBe(false);
+    await manager.shutdown();
+  }, 30_000);
+
+  it("cancellation stops implementer without silently undoing partial approved edits", async () => {
+    const { workspace, config, afterMutation } = await fixture("implement-hang");
+    const client = new RpcClient({ cliPath, cwd: workspace, model: "slaver-test/fixture", env: { PI_CODING_AGENT_DIR: config, PI_OFFLINE: "1" },
+      args: ["--no-session", "--no-extensions", "-e", extensionPath, "--tools", "delegate", "--thinking", "off"] });
+    try {
+      await client.start();
+      await client.prompt("Use implementer for the approved task");
+      await afterMutation;
+      await client.abort();
+      expect((await client.getState()).isStreaming).toBe(false);
+      expect(readFileSync(join(workspace, "entry.ts"), "utf8")).toContain("entry = false");
+      const entries = await client.getEntries();
+      const metadata = entries.entries.find(e => e.type === "custom" && e.customType === "slaver.session");
+      if (metadata?.type !== "custom") throw new Error("Missing terminal metadata");
+      expect(metadata.data).toMatchObject({ status: "cancelled", implementation: { scope: ["entry.ts", "src/new.ts"] } });
+      await client.promptAndWait("Continue and say ready", undefined, 30_000);
+      expect(await client.getLastAssistantText()).toContain("HOST_READY");
     } finally { await client.stop(); }
   }, 40_000);
 

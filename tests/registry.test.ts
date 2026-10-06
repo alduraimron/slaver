@@ -12,6 +12,7 @@ const registry = () => {
   dirs.push(dir);
   writeFileSync(join(dir, "scout.md"), file("scout"));
   writeFileSync(join(dir, "reviewer.md"), file("reviewer"));
+  writeFileSync(join(dir, "implementer.md"), file("implementer", "  - read\n  - scoped_edit\n  - scoped_write"));
   return dir;
 };
 
@@ -29,6 +30,20 @@ describe("definition registry", () => {
     const dir = registry();
     writeFileSync(join(dir, "scout.md"), file("scout").replace("canDelegate: false", "model: anthropic/small\ncanDelegate: false"));
     expect(new AgentRegistry(dir).resolve("scout", "openai/example", "high").thinking).toBe("off");
+  });
+
+  it("keeps implementer writable tools scoped and never grants them to read-only roles", () => {
+    const agents = new AgentRegistry(registry());
+    expect(agents.resolve("implementer", "openai/example", "off").tools).toEqual(["read", "scoped_edit", "scoped_write"]);
+    for (const role of ["scout", "reviewer"]) {
+      for (const tool of ["edit", "write", "scoped_edit", "scoped_write", "bash"]) {
+        expect(() => parseDefinition(file(role, `  - ${tool}`), "bad.md")).toThrow(/only read/);
+      }
+    }
+    for (const tool of ["edit", "write", "bash", "powershell", "delegate"]) {
+      expect(() => parseDefinition(file("implementer", `  - read\n  - scoped_edit\n  - scoped_write\n  - ${tool}`), "bad.md")).toThrow(/implementer tools/);
+    }
+    expect(() => parseDefinition(file("implementer"), "bad.md")).toThrow(/requires read/);
   });
 
   it("rejects unsafe tools, unknown fields, invalid timeout, duplicate names and missing roles", () => {

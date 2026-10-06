@@ -1,6 +1,10 @@
 # Agent Domain Model
 
-This document defines the core domain concepts for V0.
+This document defines the core domain concepts for V0. The current V1 addition is specified in
+[V1_IMPLEMENTER.md](V1_IMPLEMENTER.md): AgentName also accepts implementer, DelegatedTask gains optional
+runPath, and implementer sessions persist an optional frozen implementation snapshot (root, runPath,
+runHash, scope, acceptance). This is durable approval data, not a live runtime handle. Read-only sessions
+and historical entries have no snapshot and remain compatible.
 
 The semantics matter more than the exact TypeScript syntax. Do not casually add fields; each field must represent durable domain meaning.
 

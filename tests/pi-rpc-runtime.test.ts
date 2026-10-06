@@ -7,7 +7,7 @@ import type { AgentRuntime } from "../src/runtime/runtime.js";
 
 const client = vi.hoisted(() => ({
   start: vi.fn(), stop: vi.fn(), getState: vi.fn(), prompt: vi.fn(),
-  onEvent: vi.fn(), getLastAssistantText: vi.fn(),
+  onEvent: vi.fn(), getLastAssistantText: vi.fn(), getCommands: vi.fn(),
 }));
 vi.mock("@earendil-works/pi-coding-agent", () => ({
   RpcClient: vi.fn(function () { return client; }),
@@ -76,6 +76,37 @@ describe("Pi RPC runtime with fake client", () => {
     expect(client.stop).toHaveBeenCalledOnce();
     await runtime.cancel(run.session.id);
     expect(client.stop).toHaveBeenCalledOnce();
+  });
+
+  it("requires a guard readiness handshake for implementer and never sends task if absent", async () => {
+    const run = input();
+    run.definition = { ...run.definition, name: "implementer", tools: ["read", "grep", "find", "ls", "scoped_edit", "scoped_write"] };
+    run.session.implementation = { root: process.cwd(), runPath: ".pi/stapler/runs/approved.json", runHash: "approval-hash", scope: ["entry.ts"], acceptance: ["Approved behavior"] };
+    client.getCommands.mockResolvedValue([]);
+    await expect(new PiRpcRuntime(cliPath, "/trusted/guard.ts").run(run)).rejects.toMatchObject({ code: "rpc_failed", message: "Implementer write guard did not become ready" });
+    expect(client.prompt).not.toHaveBeenCalled();
+    expect(client.stop).toHaveBeenCalledOnce();
+    expect(RpcClient).toHaveBeenCalledWith(expect.objectContaining({
+      env: { SLAVER_IMPLEMENTER_SCOPE: JSON.stringify({ approval: run.session.implementation, tools: run.definition.tools }) },
+      args: expect.arrayContaining(["--no-extensions", "--no-mcp", "read,grep,find,ls,scoped_edit,scoped_write", "-e", "/trusted/guard.ts"]),
+    }));
+  });
+
+  it("passes the frozen scope and acceptance after the expected guard loads", async () => {
+    const run = input();
+    run.definition = { ...run.definition, name: "implementer", tools: ["read", "scoped_edit", "scoped_write"] };
+    run.session.implementation = { root: process.cwd(), runPath: ".pi/stapler/runs/approved.json", runHash: "approval-hash", scope: ["entry.ts"], acceptance: ["Approved behavior"] };
+    client.getCommands.mockResolvedValue([{ name: "slaver-write-guard-ready", source: "extension", description: "approval-hash" }]);
+    await new PiRpcRuntime(cliPath).run(run);
+    expect(client.prompt).toHaveBeenCalledWith(expect.stringContaining("Exact file scope:\n- entry.ts\nAcceptance:\n- Approved behavior"));
+    expect(run.onStarted).toHaveBeenCalledOnce();
+  });
+
+  it("rejects implementer without frozen approval before constructing the client", async () => {
+    const run = input();
+    run.definition.name = "implementer";
+    await expect(new PiRpcRuntime(cliPath).run(run)).rejects.toMatchObject({ code: "runtime_error" });
+    expect(RpcClient).not.toHaveBeenCalled();
   });
 
   it.each(["handled", "queued"])("fails a %s prompt immediately, without waiting for agent_settled", async disposition => {

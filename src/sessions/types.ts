@@ -1,4 +1,5 @@
 import type { DelegatedTask } from "../agents/types.js";
+import type { ApprovedImplementation } from "../runtime/implementation-scope.js";
 
 export type AgentSessionStatus = "queued" | "starting" | "running" | "completed" | "failed" | "cancelled";
 export interface AgentResult { text: string }
@@ -12,6 +13,7 @@ export interface AgentSession {
   task: DelegatedTask;
   status: AgentSessionStatus;
   workspace: { cwd: string };
+  implementation?: ApprovedImplementation;
   timestamps: { createdAt: string; startedAt?: string; endedAt?: string };
   result?: AgentResult;
   error?: AgentError;

@@ -2,6 +2,8 @@ import { RpcClient } from "@earendil-works/pi-coding-agent";
 import { resolvePiCliPath } from "./pi-cli.js";
 import type { AgentRuntime } from "./runtime.js";
 import { CleanupFailure, RuntimeFailure } from "./runtime.js";
+import { fileURLToPath } from "node:url";
+import { WRITE_GUARD_COMMAND } from "./implementation-scope.js";
 
 interface Handle { client: RpcClient; stopping?: Promise<void> }
 const MAX_RESULT_CHARS = 8_000;
@@ -9,15 +11,20 @@ const MAX_RESULT_CHARS = 8_000;
 export class PiRpcRuntime implements AgentRuntime {
   private readonly handles = new Map<string, Handle>();
 
-  constructor(private readonly cliPath?: string) {}
+  constructor(private readonly cliPath?: string,
+    private readonly guardPath = fileURLToPath(new URL("./child-write-guard.ts", import.meta.url))) {}
 
   async run({ session, definition, signal, onStarted }: Parameters<AgentRuntime["run"]>[0]) {
     if (signal.aborted) throw new RuntimeFailure("runtime_error", "Child cancelled before startup");
+    const approval = session.implementation;
+    if ((definition.name === "implementer") !== Boolean(approval)) throw new RuntimeFailure("runtime_error", "Missing or unexpected implementation approval");
     const client = new RpcClient({
       cliPath: this.cliPath ?? resolvePiCliPath(), cwd: session.workspace.cwd, model: definition.model,
+      ...(approval ? { env: { SLAVER_IMPLEMENTER_SCOPE: JSON.stringify({ approval, tools: definition.tools }) } } : {}),
       args: ["--no-session", "--no-extensions", "--no-mcp", "--no-prompt-templates",
         "--tools", definition.tools.join(","), "--thinking", definition.thinking,
-        "--append-system-prompt", definition.instructions],
+        "--append-system-prompt", definition.instructions,
+        ...(approval ? ["-e", this.guardPath] : [])],
     });
     const handle: Handle = { client };
     this.handles.set(session.id, handle);
@@ -66,11 +73,18 @@ export class PiRpcRuntime implements AgentRuntime {
         state.thinkingLevel !== definition.thinking) {
         throw new RuntimeFailure("rpc_failed", "Pi RPC child did not apply the resolved model/thinking configuration");
       }
+      if (approval) {
+        const commands = await guard(client.getCommands());
+        if (!commands.some(c => c.name === WRITE_GUARD_COMMAND && c.source === "extension" && c.description === approval.runHash)) {
+          throw new RuntimeFailure("rpc_failed", "Implementer write guard did not become ready");
+        }
+      }
       if (signal.aborted) throw new RuntimeFailure("runtime_error", "Child cancelled before prompt");
       const prompt = ["Task:", session.task.prompt,
         session.task.context ? `Context:\n${session.task.context}` : "",
         session.task.constraints?.length ? `Constraints:\n${session.task.constraints.map(c => `- ${c}`).join("\n")}` : "",
         session.task.expectedOutput ? `Expected output:\n${session.task.expectedOutput}` : "",
+        approval ? `Approved implementation:\nRun: ${approval.runPath}\nPack: .pi/stapler/\nExact file scope:\n${approval.scope.map(p => `- ${p}`).join("\n")}\nAcceptance:\n${approval.acceptance.map(a => `- ${a}`).join("\n")}\nUse scoped_edit/scoped_write only. Commands and verification remain with the parent.` : "",
       ].filter(Boolean).join("\n\n");
       let disposition;
       try {

@@ -1,4 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { approvedRun } from "./implementation-fixture.js";
 import { AgentRegistry } from "../src/agents/registry.js";
 import { AgentManager } from "../src/manager.js";
 import { CleanupFailure, RuntimeFailure, type AgentRuntime } from "../src/runtime/runtime.js";
@@ -50,6 +54,23 @@ describe("manager with fake runtime", () => {
     expect(saved).toEqual(["completed", "completed"]);
     await manager.shutdown();
     await expect(manager.delegate(request())).rejects.toThrow(/shutting down/);
+  });
+
+  it("validates implementer approval before creating a child, and never grants runPath to readers", async () => {
+    const { manager, runtime, store } = setup();
+    await expect(manager.delegate({ ...request(), agent: "implementer" })).rejects.toThrow(/requires an approved runPath/);
+    await expect(manager.delegate({ ...request(), task: { prompt: "Inspect", runPath: "x.json" } })).rejects.toThrow(/only valid for implementer/);
+    expect(runtime.calls).toHaveLength(0);
+    expect(store.listByParent("host-id")).toHaveLength(0);
+    const root = mkdtempSync(join(tmpdir(), "slaver-manager-scope-"));
+    try {
+      const runPath = approvedRun(root);
+      const outcome = await manager.delegate({ ...request(), agent: "implementer", cwd: root, task: { prompt: "Approved change", runPath } });
+      expect(outcome.status).toBe("completed");
+      expect(runtime.calls[0].session.implementation?.scope).toEqual(["entry.ts", "src/new.ts"]);
+      expect(runtime.calls[0].definition.tools).toContain("scoped_edit");
+      expect(runtime.calls[0].definition.tools).not.toContain("write");
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
   it("returns typed failure without killing the manager", async () => {

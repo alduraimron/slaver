@@ -5,6 +5,7 @@ import type { DelegatedTask } from "./agents/types.js";
 import { CleanupFailure, RuntimeFailure, type AgentRuntime } from "./runtime/runtime.js";
 import { SessionStore } from "./sessions/store.js";
 import type { AgentError, AgentSession, DelegationOutcome } from "./sessions/types.js";
+import { prepareImplementation, ScopeError } from "./runtime/implementation-scope.js";
 
 interface ActiveRun {
   abort: () => void;
@@ -32,14 +33,18 @@ export class AgentManager {
     signal?: AbortSignal;
   }): Promise<DelegationOutcome> {
     if (this.shuttingDown) throw new Error("Agent manager is shutting down");
-    if (this.active.size > 0) throw new Error("V0 allows only one active delegation at a time");
+    if (this.active.size > 0) throw new Error("Slaver allows only one active delegation at a time");
     if (!input.task.prompt.trim()) throw new Error("Delegated task must be non-empty");
     if (!input.parentId || !input.cwd) throw new Error("Parent session ID and cwd are required");
     const definition = this.registry.resolve(input.agent, input.model, input.thinking);
+    if (definition.name === "implementer" && !input.task.runPath) throw new ScopeError("Implementer requires an approved runPath");
+    if (definition.name !== "implementer" && input.task.runPath !== undefined) throw new ScopeError("runPath is only valid for implementer");
+    const implementation = definition.name === "implementer" ? prepareImplementation(input.cwd, input.task.runPath!) : undefined;
     const session = this.store.create({
       id: randomUUID(), parentId: input.parentId,
       agent: { name: definition.name, definitionFingerprint: definition.fingerprint },
       task: structuredClone(input.task), status: "queued", workspace: { cwd: input.cwd },
+      ...(implementation ? { implementation } : {}),
       timestamps: { createdAt: new Date().toISOString() },
     });
     this.store.transition(session.id, "starting");
