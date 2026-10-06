@@ -1,16 +1,16 @@
 import { createServer, type Server } from "node:http";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { RpcClient } from "@earendil-works/pi-coding-agent";
 import { AgentRegistry } from "../src/agents/registry.js";
 import { AgentManager } from "../src/manager.js";
 import { PiRpcRuntime } from "../src/runtime/pi-rpc-runtime.js";
+import { resolvePiCliPath } from "../src/runtime/pi-cli.js";
 import { SessionStore } from "../src/sessions/store.js";
 
-const cliPath = fileURLToPath(new URL("./cli.js", import.meta.resolve("@earendil-works/pi-coding-agent")));
+const cliPath = process.env.SLAVER_TEST_CLI_PATH ? resolve(process.env.SLAVER_TEST_CLI_PATH) : resolvePiCliPath();
 const extensionPath = process.env.SLAVER_TEST_EXTENSION_PATH ?? resolve("src/index.ts");
 const folders: string[] = [];
 const servers: Server[] = [];
@@ -90,7 +90,54 @@ async function fixture(mode: Mode) {
   return { requests, childCall, workspace, config };
 }
 
+function packageCopy(stalePeer: boolean) {
+  const root = mkdtempSync(join(tmpdir(), "slaver-package-"));
+  folders.push(root);
+  for (const path of ["src", "agents", "package.json"]) cpSync(resolve(path), join(root, path), { recursive: true });
+  expect(existsSync(join(root, "node_modules"))).toBe(false);
+  const staleMarker = join(root, "stale-cli-started");
+  if (stalePeer) {
+    const peer = join(root, "node_modules/@earendil-works/pi-coding-agent");
+    mkdirSync(join(peer, "dist"), { recursive: true });
+    writeFileSync(join(peer, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent",
+      version: "0.86.0", type: "module", exports: { ".": "./dist/index.js" } }));
+    writeFileSync(join(peer, "dist/index.js"), 'throw new Error("Stale peer must not be imported");\n');
+    writeFileSync(join(peer, "dist/cli.js"), `import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(staleMarker)}, "started");
+process.exit(1);\n`);
+  }
+  return { root, staleMarker };
+}
+
 describe("real Pi RPC process", () => {
+  it.each([
+    { scenario: "without local Pi peers", stalePeer: false },
+    { scenario: "with a stale Pi peer", stalePeer: true },
+  ])("loads a managed package $scenario and delegates using host Pi", async ({ stalePeer }) => {
+    const { requests, workspace, config } = await fixture("success");
+    const { root, staleMarker } = packageCopy(stalePeer);
+    const mcpMarker = join(config, "mcp-started");
+    writeFileSync(join(config, "mcp.json"), JSON.stringify({ mcpServers: {
+      forbidden: { command: process.execPath, args: ["-e",
+        `require("node:fs").writeFileSync(${JSON.stringify(mcpMarker)}, "started")`], exposure: "direct" },
+    } }));
+    const client = new RpcClient({ cliPath, cwd: workspace, model: "slaver-test/fixture",
+      env: { PI_CODING_AGENT_DIR: config, PI_OFFLINE: "1" },
+      args: ["--no-session", "--no-extensions", "-e", root, "--tools", "delegate", "--thinking", "off"] });
+    try {
+      await client.start();
+      expect((await client.getCommands()).some(c => c.name === "subagents")).toBe(true);
+      await client.promptAndWait("Use scout to find the entry point", undefined, 30_000);
+      expect(await client.getLastAssistantText()).toContain('"status":"completed"');
+      const child = requests.find(r => r.tools?.some(t => t.function.name === "read"));
+      expect(child?.tools?.map(t => t.function.name).sort()).toEqual(["find", "grep", "ls", "read"]);
+      expect(existsSync(staleMarker)).toBe(false);
+      expect(existsSync(mcpMarker)).toBe(false);
+      await client.promptAndWait("Continue and say ready", undefined, 30_000);
+      expect(await client.getLastAssistantText()).toContain("HOST_READY");
+    } finally { await client.stop(); }
+  }, 40_000);
+
   it("runs host extension -> restricted RPC child -> concise result and lets host continue", async () => {
     const { requests, workspace, config } = await fixture("success");
     const client = new RpcClient({ cliPath, cwd: workspace, model: "slaver-test/fixture", env: { PI_CODING_AGENT_DIR: config, PI_OFFLINE: "1" },
@@ -186,7 +233,7 @@ describe("real Pi RPC process", () => {
   it("cancels a pending child RPC run and cleans up", async () => {
     const { workspace, childCall } = await fixture("hang");
     const store = new SessionStore();
-    const runtime = new PiRpcRuntime();
+    const runtime = new PiRpcRuntime(cliPath);
     const manager = new AgentManager(new AgentRegistry(), store, runtime);
     const controller = new AbortController();
     const pending = manager.delegate({ agent: "scout", task: { prompt: "Wait forever" }, parentId: "host-id",

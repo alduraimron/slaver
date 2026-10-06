@@ -1,20 +1,21 @@
-import { fileURLToPath } from "node:url";
 import { RpcClient } from "@earendil-works/pi-coding-agent";
+import { resolvePiCliPath } from "./pi-cli.js";
 import type { AgentRuntime } from "./runtime.js";
 import { CleanupFailure, RuntimeFailure } from "./runtime.js";
 
 interface Handle { client: RpcClient; stopping?: Promise<void> }
-const cliPath = fileURLToPath(new URL("./cli.js", import.meta.resolve("@earendil-works/pi-coding-agent")));
 const MAX_RESULT_CHARS = 8_000;
 
 export class PiRpcRuntime implements AgentRuntime {
   private readonly handles = new Map<string, Handle>();
 
+  constructor(private readonly cliPath?: string) {}
+
   async run({ session, definition, signal, onStarted }: Parameters<AgentRuntime["run"]>[0]) {
     if (signal.aborted) throw new RuntimeFailure("runtime_error", "Child cancelled before startup");
     const client = new RpcClient({
-      cliPath, cwd: session.workspace.cwd, model: definition.model,
-      args: ["--no-session", "--no-extensions", "--no-prompt-templates",
+      cliPath: this.cliPath ?? resolvePiCliPath(), cwd: session.workspace.cwd, model: definition.model,
+      args: ["--no-session", "--no-extensions", "--no-mcp", "--no-prompt-templates",
         "--tools", definition.tools.join(","), "--thinking", definition.thinking,
         "--append-system-prompt", definition.instructions],
     });
@@ -71,10 +72,14 @@ export class PiRpcRuntime implements AgentRuntime {
         session.task.constraints?.length ? `Constraints:\n${session.task.constraints.map(c => `- ${c}`).join("\n")}` : "",
         session.task.expectedOutput ? `Expected output:\n${session.task.expectedOutput}` : "",
       ].filter(Boolean).join("\n\n");
+      let disposition;
       try {
-        await guard(client.prompt(prompt));
+        disposition = await guard(client.prompt(prompt));
       } catch {
         throw new RuntimeFailure("rpc_failed", "Pi RPC child rejected the task");
+      }
+      if (disposition !== "started") {
+        throw new RuntimeFailure("rpc_failed", "Pi RPC child did not start the delegated task");
       }
       onStarted();
       poll = setInterval(() => {
