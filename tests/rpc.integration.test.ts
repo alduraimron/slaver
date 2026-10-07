@@ -1,5 +1,5 @@
 import { createServer, type Server } from "node:http";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -28,7 +28,7 @@ afterEach(async () => {
 });
 
 type Mode = "success" | "failure" | "hang" | "implement" | "deny-writes" | "implement-hang";
-async function fixture(mode: Mode) {
+async function fixture(mode: Mode, workspacePath?: string) {
   const requests: Array<{ messages: Array<{ role: string; content?: string }>; tools?: Array<{ function: { name: string } }> }> = [];
   let mutationFinished!: () => void;
   const afterMutation = new Promise<void>(resolve => { mutationFinished = resolve; });
@@ -71,7 +71,7 @@ async function fixture(mode: Mode) {
       const role = userText.includes("Use implementer") ? "implementer" : userText.includes("reviewer") ? "reviewer" : "scout";
       send({ tool_calls: [{ index: 0, id: "call-1", type: "function",
         function: { name: "delegate", arguments: JSON.stringify({ agent: role, task: "Perform the approved task",
-          ...(role === "implementer" ? { runPath: APPROVED_RUN } : {}) }) } }] });
+          ...(role === "implementer" ? { runPath: APPROVED_RUN } : {}), ...(workspacePath ? { workspacePath } : {}) }) } }] });
       send({}, "tool_calls");
     } else if (!isHost && ["implement", "deny-writes", "implement-hang"].includes(mode) && !toolResult) {
       send({ role: "assistant" });
@@ -171,6 +171,10 @@ describe("real Pi RPC process", () => {
       await client.start();
       const events = await client.promptAndWait("Use scout to find the entry point", undefined, 30_000);
       expect(events.some(e => e.type === "agent_settled")).toBe(true);
+      const updates = events.filter(e => e.type === "tool_execution_update" && e.toolName === "delegate");
+      expect(updates.length).toBeGreaterThan(0);
+      expect(JSON.stringify(updates)).toContain("elapsedMs");
+      expect(JSON.stringify(updates)).not.toContain("SCOUT: src/index.ts:1");
       const answer = await client.getLastAssistantText();
       expect(answer).toContain('"status":"completed"');
       expect(answer).toContain("SCOUT: src/index.ts:1");
@@ -254,6 +258,49 @@ describe("real Pi RPC process", () => {
       }
       await client.promptAndWait("Continue and say ready", undefined, 30_000);
       expect(await client.getLastAssistantText()).toContain("HOST_READY");
+    } finally { await client.stop(); }
+  }, 40_000);
+
+  it.each(["valid", "missing", "wrong"])("cross-workspace writes retain original host inspection and require %s root binding", async binding => {
+    const target = realpathSync(mkdtempSync(join(tmpdir(), "slaver-selected-workspace-")));
+    folders.push(target);
+    writeFileSync(join(target, "entry.ts"), "export const entry = true;\n");
+    approvedRun(target, binding === "missing" ? {} : { workspaceRoot: binding === "valid" ? target : join(target, "wrong") });
+    const { requests, workspace, config } = await fixture("implement", target);
+    const client = new RpcClient({ cliPath, cwd: workspace, model: "slaver-test/fixture", env: { PI_CODING_AGENT_DIR: config, PI_OFFLINE: "1" },
+      args: ["--no-session", "--no-extensions", "-e", extensionPath, "--tools", "delegate", "--thinking", "off"] });
+    try {
+      await client.start();
+      const hostId = (await client.getState()).sessionId;
+      const events = await client.promptAndWait("Use implementer for the selected workspace", undefined, 30_000);
+      const answer = await client.getLastAssistantText();
+      expect(readFileSync(join(workspace, "entry.ts"), "utf8")).toContain("entry = true");
+      const entries = (await client.getEntries()).entries;
+      const metadata = entries.find(e => e.type === "custom" && e.customType === "slaver.session");
+      if (binding === "valid") {
+        expect(answer).toContain('"status":"completed"');
+        expect(readFileSync(join(target, "entry.ts"), "utf8")).toContain("entry = false");
+        expect(readFileSync(join(target, "src/new.ts"), "utf8")).toContain("added = true");
+        if (metadata?.type !== "custom") throw new Error("Original host lost delegated metadata");
+        expect(metadata.data).toMatchObject({ parentId: hostId, workspace: { cwd: target }, implementation: { root: target } });
+        expect(events.some(e => e.type === "tool_execution_update" && e.toolName === "delegate")).toBe(true);
+        const notifications: string[] = [];
+        const unsubscribe = client.onEvent(e => {
+          const event = e as unknown as { type: string; method?: string; message?: string };
+          if (event.type === "extension_ui_request" && event.method === "notify") notifications.push(event.message ?? "");
+        });
+        try { await client.prompt(`/subagents ${(metadata.data as { id: string }).id}`); }
+        finally { unsubscribe(); }
+        expect(notifications.join(" ")).toContain(target);
+        expect(requests.find(r => r.tools?.some(t => t.function.name === "scoped_write"))?.tools?.map(t => t.function.name).sort())
+          .toEqual(["find", "grep", "ls", "read", "scoped_edit", "scoped_write"]);
+      } else {
+        expect(answer).toContain("workspaceRoot");
+        expect(readFileSync(join(target, "entry.ts"), "utf8")).toContain("entry = true");
+        expect(existsSync(join(target, "src/new.ts"))).toBe(false);
+        expect(metadata).toBeUndefined();
+        expect(requests.some(r => r.tools?.some(t => t.function.name === "scoped_write"))).toBe(false);
+      }
     } finally { await client.stop(); }
   }, 40_000);
 

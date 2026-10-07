@@ -4,7 +4,10 @@ This document defines the core domain concepts for V0. The current V1 addition i
 [V1_IMPLEMENTER.md](V1_IMPLEMENTER.md): AgentName also accepts implementer, DelegatedTask gains optional
 runPath, and implementer sessions persist an optional frozen implementation snapshot (root, runPath,
 runHash, scope, acceptance). This is durable approval data, not a live runtime handle. Read-only sessions
-and historical entries have no snapshot and remain compatible.
+and historical entries have no snapshot and remain compatible. Optional workspacePath is an input to
+workspace resolution; the durable session stores its resolved workspace.cwd, not duplicate child lists
+or a runtime handle. Cross-workspace writable approvals bind workspaceRoot in the run. Progress is
+an ephemeral bounded observation callback, not persisted RPC events or part of the final result.
 
 The semantics matter more than the exact TypeScript syntax. Do not casually add fields; each field must represent durable domain meaning.
 

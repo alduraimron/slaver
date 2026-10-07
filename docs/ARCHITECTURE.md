@@ -4,6 +4,8 @@ The shared V0 architecture below remains in place. [V1_IMPLEMENTER.md](V1_IMPLEM
 approved-scope writable addition: the manager freezes an approved run, the runtime explicitly loads a
 scoped-tool guard only for implementer and verifies readiness before prompting. Other children remain
 read-only; no scheduler, shell runner, project-defined roles or recursive delegation is added.
+V1 also permits an explicitly selected workspace (with run/root binding for cross-workspace writes)
+and bounded progress notifications; raw child events still never enter parent model context.
 
 ## 1. Summary
 

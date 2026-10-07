@@ -14,7 +14,7 @@ export class PiRpcRuntime implements AgentRuntime {
   constructor(private readonly cliPath?: string,
     private readonly guardPath = fileURLToPath(new URL("./child-write-guard.ts", import.meta.url))) {}
 
-  async run({ session, definition, signal, onStarted }: Parameters<AgentRuntime["run"]>[0]) {
+  async run({ session, definition, signal, onStarted, onProgress }: Parameters<AgentRuntime["run"]>[0]) {
     if (signal.aborted) throw new RuntimeFailure("runtime_error", "Child cancelled before startup");
     const approval = session.implementation;
     if ((definition.name === "implementer") !== Boolean(approval)) throw new RuntimeFailure("runtime_error", "Missing or unexpected implementation approval");
@@ -43,10 +43,27 @@ export class PiRpcRuntime implements AgentRuntime {
       void this.stop(session.id).catch(() => interrupt(new RuntimeFailure("runtime_error", "Child cleanup failed")));
     };
     signal.addEventListener("abort", onAbort, { once: true });
+    let toolCalls = 0;
+    let lastTool: string | undefined;
+    let lastProgressAt = 0;
+    const reportProgress = (force = false) => {
+      const now = Date.now();
+      if (!force && now - lastProgressAt < 1000) return;
+      lastProgressAt = now;
+      try {
+        const observed = onProgress?.({ toolCalls, ...(lastTool ? { lastTool } : {}) });
+        void Promise.resolve(observed).catch(() => {});
+      } catch {}
+    };
     let lastStopReason: string | undefined;
     let settled!: () => void;
     const complete = new Promise<void>(resolve => { settled = resolve; });
     const unsubscribe = client.onEvent(event => {
+      if (event.type === "tool_execution_start" && definition.tools.includes(event.toolName)) {
+        toolCalls += 1;
+        lastTool = event.toolName;
+        reportProgress();
+      }
       if (event.type === "message_end" && event.message.role === "assistant") {
         lastStopReason = event.message.stopReason;
       }
@@ -96,8 +113,10 @@ export class PiRpcRuntime implements AgentRuntime {
         throw new RuntimeFailure("rpc_failed", "Pi RPC child did not start the delegated task");
       }
       onStarted();
+      reportProgress(true);
       poll = setInterval(() => {
         void client.getState().catch(() => interrupt(new RuntimeFailure("rpc_failed", "Pi RPC child disconnected")));
+        if (Date.now() - lastProgressAt >= 5000) reportProgress();
       }, 1000);
       await guard(complete);
       if (lastStopReason === "error") throw new RuntimeFailure("agent_failed", "Child model request failed");
@@ -106,6 +125,7 @@ export class PiRpcRuntime implements AgentRuntime {
       try { text = await client.getLastAssistantText(); }
       catch { throw new RuntimeFailure("rpc_failed", "Could not read the child answer"); }
       if (!text?.trim()) throw new RuntimeFailure("invalid_result", "Child returned no final answer");
+      reportProgress(true);
       return { text: text.length > MAX_RESULT_CHARS ? `${text.slice(0, MAX_RESULT_CHARS)}\n[Result truncated]` : text };
     } finally {
       if (poll) clearInterval(poll);

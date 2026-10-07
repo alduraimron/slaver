@@ -9,6 +9,16 @@ context, host ownership and no-recursion contracts remain unchanged. No teams, s
 `delegate` accepts `agent: "implementer"` and requires `runPath`, a repository-relative JSON file under
 `.pi/stapler/runs/`. Read-only agents reject `runPath`. The host loads the run before creating a child.
 
+Optional `workspacePath` selects an existing absolute project directory for any role; omitted means the
+host cwd, preserving V0 calls. Selection is explicit, canonicalized, and belongs to the child session,
+not task prose or agent definitions. An implementer targeting a different canonical cwd requires the
+run's `workspaceRoot` to equal that selected canonical absolute path. A missing/mismatched binding fails
+before child creation. Legacy runs without that field remain valid only for same-workspace writes;
+when provided, a binding is always validated. All writes remain exact-file scoped inside the selected
+root, with the same protected paths and readiness handshake. Parent must obtain ACC for that root and
+check its pack, not the host's unrelated pack. ParentId remains the original host session, so inspect
+and cancel continue through its /subagents and /cancel-subagent commands; no transport SDK host is needed.
+
 The run must have `schemaVersion: 1`, an `acc` value of `first` or `repeated`, a non-empty list of literal
 file paths in `scope`, and non-empty `acceptance`. These ACC values record parent approval; they do not
 cryptographically prove conversational user consent. Stapler must obtain explicit ACC before writing the
@@ -48,6 +58,11 @@ Implementer only edits approved files and reports changes/blockers; completed do
 or verification passed. No git operations, migrations, installs, check/verifier or tests run in the child. Deletion/rename is also
 parent-owned; scoped_edit/scoped_write do not provide those operations.
 
+The blocking tool emits bounded progress: logical id, role, lifecycle status, elapsed time, tool-call
+count and last allowed tool name. No prompts, parameters, model text/reasoning, credentials or raw events
+are forwarded. Heartbeats are rate-limited and observation failures cannot change execution outcomes.
+Progress is not acceptance, a write-success claim or an automatic retry.
+
 Failure, timeout or cancellation can leave partial in-scope edits. Do not auto-rollback, retry, or blindly
 fall back to more writes. The parent first inspects the worktree and reports the state; cancellation waits
 for user direction. A blocked scope/decision requires a revised pre-ACC summary, not a wider child scope.
@@ -59,3 +74,7 @@ for user direction. A blocked scope/decision requires a revised pre-ACC summary,
 - In-scope edits/new files work; out-of-scope, traversal, protected paths, symlinks/hardlinks and directories fail.
 - Guard absence fails before model execution, with no writable built-ins.
 - Real RPC tests exercise approved writes and denied writes, and confirm host continuation/tool isolation.
+- Cross-workspace writes require explicit root binding and retain the original parent identity/inspection;
+  wrong/missing bindings fail before spawn. Legacy same-cwd runs remain valid.
+- Progress exposes bounded metadata only; observer failures, heartbeat updates and cancellation do not
+  leak child text/arguments or change cleanup and terminal semantics.

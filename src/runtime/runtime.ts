@@ -15,12 +15,18 @@ export class CleanupFailure extends RuntimeFailure {
   }
 }
 
+export interface RuntimeProgress {
+  toolCalls: number;
+  lastTool?: string;
+}
+
 export interface AgentRuntime {
   run(input: {
     session: AgentSession;
     definition: ResolvedAgentDefinition;
     signal: AbortSignal;
     onStarted: () => void;
+    onProgress?: (progress: RuntimeProgress) => void;
   }): Promise<AgentResult>;
   cancel(sessionId: string): Promise<void>;
 }

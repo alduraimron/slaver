@@ -36,12 +36,17 @@ export default function (pi: ExtensionAPI): void {
       constraints: Type.Optional(Type.Array(Type.String())),
       expectedOutput: Type.Optional(Type.String()),
       runPath: Type.Optional(Type.String({ minLength: 1, description: "Implementer only: approved .pi/stapler/runs/<file>.json. Scope and acceptance are loaded from this file, not task text." })),
+      workspacePath: Type.Optional(Type.String({ minLength: 1, description: "Existing absolute target project root; omitted uses host cwd. Cross-workspace implementer requires matching canonical workspaceRoot in the approved run." })),
     }),
-    async execute(_id, params, signal, _onUpdate, ctx) {
+    async execute(_id, params, signal, onUpdate, ctx) {
       const outcome = await manager.delegate({
         agent: params.agent,
         task: { prompt: params.task, context: params.context, constraints: params.constraints, expectedOutput: params.expectedOutput, runPath: params.runPath },
-        parentId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd,
+        parentId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, workspacePath: params.workspacePath,
+        onProgress: (progress) => onUpdate?.({
+          content: [{ type: "text", text: `[slaver] ${progress.agent} ${progress.id}: ${progress.status}, ${Math.floor(progress.elapsedMs / 1000)}s, ${progress.toolCalls} tool calls${progress.lastTool ? ` (${progress.lastTool})` : ""}` }],
+          details: { progress },
+        }),
         model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "",
         thinking: ctx.thinkingLevel ?? "off", signal,
       });

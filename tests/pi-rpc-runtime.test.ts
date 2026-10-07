@@ -121,6 +121,43 @@ describe("Pi RPC runtime with fake client", () => {
     expect(client.stop).toHaveBeenCalledOnce();
   });
 
+  it("relays only bounded tool progress, never child arguments/text, even if an observer throws", async () => {
+    const run = input();
+    const updates: Array<{ toolCalls: number; lastTool?: string }> = [];
+    run.onProgress = (progress) => { updates.push(progress); throw new Error("UI unavailable"); };
+    const normal = client.prompt.getMockImplementation()!;
+    client.prompt.mockImplementation(async (...args) => {
+      listener({ type: "tool_execution_start", toolCallId: "read-1", toolName: "read", args: { path: "private-path", content: "never-forward-child-data" } });
+      listener({ type: "tool_execution_start", toolCallId: "unknown-2", toolName: "never-forward-child-data", args: {} });
+      return normal(...args);
+    });
+    expect(await new PiRpcRuntime(cliPath).run(run)).toEqual({ text: "Found src/index.ts:1" });
+    expect(updates.at(-1)).toEqual({ toolCalls: 1, lastTool: "read" });
+    expect(JSON.stringify(updates)).not.toMatch(/private-path|never-forward-child-data|Found src/);
+    expect(client.stop).toHaveBeenCalledOnce();
+  });
+
+  it("emits rate-limited idle heartbeats and stops them after cancellation", async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const updates = vi.fn();
+      const run = { ...input(), signal: controller.signal, onProgress: updates };
+      client.prompt.mockResolvedValue("started");
+      const pending = new PiRpcRuntime(cliPath).run(run);
+      const rejection = expect(pending).rejects.toMatchObject({ code: "runtime_error" });
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(updates.mock.calls.length).toBeLessThanOrEqual(3);
+      expect(updates.mock.calls.length).toBeGreaterThanOrEqual(2);
+      controller.abort();
+      await rejection;
+      const count = updates.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(updates).toHaveBeenCalledTimes(count);
+      expect(client.stop).toHaveBeenCalledOnce();
+    } finally { vi.useRealTimers(); }
+  });
+
   it("reports an unavailable host CLI during delegation, not extension loading", async () => {
     vi.mocked(getPackageDir).mockReturnValue(join(tmpdir(), "slaver-missing-host-pi"));
     const runtime = new PiRpcRuntime();

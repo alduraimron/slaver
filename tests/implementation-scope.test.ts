@@ -2,7 +2,7 @@ import { linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ImplementationGuard, isSlaverRuntimePath, prepareImplementation, writeApprovedFile } from "../src/runtime/implementation-scope.js";
+import { ImplementationGuard, isSlaverRuntimePath, prepareImplementation, resolveWorkspace, writeApprovedFile } from "../src/runtime/implementation-scope.js";
 import { approvedRun, APPROVED_RUN } from "./implementation-fixture.js";
 
 const roots: string[] = [];
@@ -62,6 +62,28 @@ describe("approved implementation scope", () => {
     approvedRun(root, { scope: ["src"] });
     mkdirSync(join(root, "src"));
     expect(() => prepareImplementation(root, APPROVED_RUN)).toThrow(/regular/);
+  });
+
+  it("requires an exact canonical workspace binding for cross-workspace approval, preserving legacy runs", () => {
+    const root = fixture();
+    expect(prepareImplementation(root, APPROVED_RUN).root).toBe(root);
+    expect(() => prepareImplementation(root, APPROVED_RUN, { requireWorkspaceBinding: true })).toThrow(/workspaceRoot/);
+    approvedRun(root, { workspaceRoot: directory() });
+    expect(() => prepareImplementation(root, APPROVED_RUN)).toThrow(/workspaceRoot/);
+    approvedRun(root, { workspaceRoot: root });
+    const bound = prepareImplementation(root, APPROVED_RUN, { requireWorkspaceBinding: true });
+    expect(new ImplementationGuard(bound).approval.root).toBe(root);
+    approvedRun(root, { workspaceRoot: null });
+    expect(() => prepareImplementation(root, APPROVED_RUN)).toThrow(/workspaceRoot/);
+  });
+
+  it("resolves only explicitly selected existing absolute workspace directories", () => {
+    const root = fixture();
+    expect(resolveWorkspace(root)).toBe(root);
+    expect(resolveWorkspace(directory(), root)).toBe(root);
+    for (const bad of ["../other", "~/code", "", root + "/*", root + "/missing", join(root, "entry.ts")]) {
+      expect(() => resolveWorkspace(root, bad)).toThrow(/existing absolute directory/);
+    }
   });
 
   it("protects the loaded Slaver runtime/definitions from self-modification", () => {

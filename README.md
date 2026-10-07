@@ -28,14 +28,17 @@ The main agent gets one tool:
 
 ```text
 delegate({ agent: "scout" | "reviewer", task: "...", context?: "..." })
-delegate({ agent: "implementer", task: "...", runPath: ".pi/stapler/runs/<file>.json", context?: "..." })
+delegate({ agent: "implementer", task: "...", runPath: ".pi/stapler/runs/<file>.json", context?: "...", workspacePath?: "/absolute/project" })
 ```
 
 It waits for a terminal outcome, returned as JSON with `id`, `agent`, and `status` (`completed`, `failed`, or `cancelled`). A successful result has `result`; a failure has a typed `error`. The full child event stream never enters the parent model context. Use `/subagents` to list delegated sessions, `/subagents <id>` to inspect one, and `/cancel-subagent [id]` to cancel the active child. Session metadata is also saved as non-model-context Pi entries when the host session is persisted.
 
 ## Behavior and boundaries
 
-- Each task starts a fresh Pi RPC child in the host working directory, with no copied parent transcript. Its CLI comes from the host's `getPackageDir()` and declared `bin`, not Slaver's local `node_modules` or a different `pi` on `PATH`. Restart Pi after updating it so host and child stay on the same version.
+- Each task starts a fresh Pi RPC child in the host cwd or explicit existing absolute `workspacePath`,
+  with no copied parent transcript. For cross-workspace implementer, the run must bind `workspaceRoot`
+  to that canonical directory; missing/wrong bindings fail before spawn. Exact file scope is unchanged.
+  Parent identity remains the current host, so `/subagents` and cancellation work there without a second SDK transport host. Its CLI comes from the host's `getPackageDir()` and declared `bin`, not Slaver's local `node_modules` or a different `pi` on `PATH`. Restart Pi after updating it so host and child stay on the same version.
 - The default child model and thinking level come from the host. An agent definition may override the model with a `provider/model` ID and set a Pi-supported thinking level. A model override without a thinking override defaults to `off` to avoid inheriting an unsupported level. An unavailable or incompatible model fails rather than silently falling back.
 - Scout/Reviewer tools are exactly `read`, `grep`, `find`, and `ls`. Implementer also gets `scoped_edit`
   and `scoped_write`, from one explicitly loaded guard extension. Built-in `write`/`edit`, bash/powershell,
@@ -49,6 +52,9 @@ It waits for a terminal outcome, returned as JSON with `id`, `agent`, and `statu
   same-user process racing directory changes. Reads are not sandboxed. Keep the workspace quiescent.
   Failed/cancelled implementations can leave partial approved edits; inspect them, never auto-rollback
   or blindly retry. Implementer cannot delete/rename files or run commands/tests; parent handles those.
+- Blocking calls emit rate-limited progress: id, role, status, elapsed time, tool-call count and last
+  allowed tool name. No child text, reasoning, arguments, secrets or raw event stream is forwarded.
+  A progress observer failure never changes the child's outcome. It does not imply acceptance.
 - Only one delegation may run at a time. A timeout fails the run, while host abort and explicit cancellation cancel it. All terminal paths stop the child process.
 - Agent definition files are packaged in `agents/`; arbitrary project-defined roles are not loaded.
 

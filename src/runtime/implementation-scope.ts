@@ -78,7 +78,20 @@ function runBytes(root: string, runPath: string): Buffer {
 
 const hash = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
 
-export function prepareImplementation(cwd: string, requestedRun: string): ApprovedImplementation {
+export function resolveWorkspace(cwd: string, requested?: string): string {
+  if (requested === undefined) return cwd;
+  if (!requested || !isAbsolute(requested) || /[\x00-\x1f\x7f*?]/.test(requested)) {
+    throw new ScopeError("workspacePath must be an existing absolute directory, not task prose or a pattern");
+  }
+  try {
+    const root = realpathSync(requested);
+    if (!lstatSync(root).isDirectory()) throw new Error("Not a directory");
+    return root;
+  } catch { throw new ScopeError("workspacePath must be an existing absolute directory"); }
+}
+
+export function prepareImplementation(cwd: string, requestedRun: string,
+  options: { requireWorkspaceBinding?: boolean } = {}): ApprovedImplementation {
   const root = realpathSync(cwd);
   const runPath = repoPath(requestedRun);
   if (!/^\.pi\/stapler\/runs\/[^/]+\.json$/.test(runPath)) throw new ScopeError("runPath must be .pi/stapler/runs/<file>.json");
@@ -94,6 +107,9 @@ export function prepareImplementation(cwd: string, requestedRun: string): Approv
   }
   if (!Array.isArray(run.acceptance) || !run.acceptance.length || run.acceptance.some(a => typeof a !== "string" || !a.trim())) {
     throw new ScopeError("Approved run requires non-empty acceptance criteria");
+  }
+  if ((run.workspaceRoot !== undefined || options.requireWorkspaceBinding) && run.workspaceRoot !== root) {
+    throw new ScopeError("Approved run workspaceRoot must match the selected canonical workspace for cross-workspace writes");
   }
   const scope = (run.scope as string[]).map(repoPath);
   if (new Set(scope).size !== scope.length) throw new ScopeError("Duplicate scope paths");

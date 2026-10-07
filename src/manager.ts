@@ -1,11 +1,19 @@
 import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { AgentRegistry } from "./agents/registry.js";
 import type { DelegatedTask } from "./agents/types.js";
-import { CleanupFailure, RuntimeFailure, type AgentRuntime } from "./runtime/runtime.js";
+import { CleanupFailure, RuntimeFailure, type AgentRuntime, type RuntimeProgress } from "./runtime/runtime.js";
 import { SessionStore } from "./sessions/store.js";
 import type { AgentError, AgentSession, DelegationOutcome } from "./sessions/types.js";
-import { prepareImplementation, ScopeError } from "./runtime/implementation-scope.js";
+import { prepareImplementation, resolveWorkspace, ScopeError } from "./runtime/implementation-scope.js";
+
+export interface DelegationProgress extends RuntimeProgress {
+  id: string;
+  agent: AgentSession["agent"]["name"];
+  status: AgentSession["status"];
+  elapsedMs: number;
+}
 
 interface ActiveRun {
   abort: () => void;
@@ -28,9 +36,11 @@ export class AgentManager {
     task: DelegatedTask;
     parentId: string;
     cwd: string;
+    workspacePath?: string;
     model: string;
     thinking: ThinkingLevel;
     signal?: AbortSignal;
+    onProgress?: (progress: DelegationProgress) => void;
   }): Promise<DelegationOutcome> {
     if (this.shuttingDown) throw new Error("Agent manager is shutting down");
     if (this.active.size > 0) throw new Error("Slaver allows only one active delegation at a time");
@@ -39,15 +49,30 @@ export class AgentManager {
     const definition = this.registry.resolve(input.agent, input.model, input.thinking);
     if (definition.name === "implementer" && !input.task.runPath) throw new ScopeError("Implementer requires an approved runPath");
     if (definition.name !== "implementer" && input.task.runPath !== undefined) throw new ScopeError("runPath is only valid for implementer");
-    const implementation = definition.name === "implementer" ? prepareImplementation(input.cwd, input.task.runPath!) : undefined;
+    const cwd = resolveWorkspace(input.cwd, input.workspacePath);
+    const crossWorkspace = input.workspacePath !== undefined && realpathSync(input.cwd) !== cwd;
+    const implementation = definition.name === "implementer"
+      ? prepareImplementation(cwd, input.task.runPath!, { requireWorkspaceBinding: crossWorkspace }) : undefined;
     const session = this.store.create({
       id: randomUUID(), parentId: input.parentId,
       agent: { name: definition.name, definitionFingerprint: definition.fingerprint },
-      task: structuredClone(input.task), status: "queued", workspace: { cwd: input.cwd },
+      task: structuredClone(input.task), status: "queued", workspace: { cwd },
       ...(implementation ? { implementation } : {}),
       timestamps: { createdAt: new Date().toISOString() },
     });
     this.store.transition(session.id, "starting");
+    const created = Date.now();
+    let progress: RuntimeProgress = { toolCalls: 0 };
+    const notify = () => {
+      // Progress is diagnostic and must not re-enter execution before the active run is registered.
+      if (!this.active.has(session.id)) return;
+      const current = this.store.get(session.id)!;
+      try {
+        const observed = input.onProgress?.({ ...progress, id: session.id, agent: current.agent.name,
+          status: current.status, elapsedMs: Math.max(0, Date.now() - created) });
+        void Promise.resolve(observed).catch(() => {});
+      } catch {}
+    };
     const controller = new AbortController();
     let expired = false;
     const abort = () => controller.abort();
@@ -66,7 +91,12 @@ export class AgentManager {
           result = await this.runtime.run({
             session, definition, signal: controller.signal,
             onStarted: () => {
-              if (!controller.signal.aborted) this.store.transition(session.id, "running");
+              if (!controller.signal.aborted) { this.store.transition(session.id, "running"); notify(); }
+            },
+            onProgress: (update) => {
+              progress = { toolCalls: update.toolCalls,
+                ...(update.lastTool && definition.tools.includes(update.lastTool) ? { lastTool: update.lastTool } : {}) };
+              notify();
             },
           });
         }
@@ -93,6 +123,7 @@ export class AgentManager {
       } else {
         terminal = this.store.transition(session.id, "completed", result);
       }
+      notify();
       try {
         this.onTerminal?.(terminal);
       } catch {
@@ -104,6 +135,7 @@ export class AgentManager {
       return { session: terminal, status: "cancelled" };
     })();
     this.active.set(session.id, { abort, done });
+    notify();
     try {
       return await done;
     } finally {

@@ -73,6 +73,43 @@ describe("manager with fake runtime", () => {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
+  it("selects a bound target workspace without changing parent identity or widening writes", async () => {
+    const { manager, runtime, store } = setup();
+    const root = mkdtempSync(join(tmpdir(), "slaver-target-"));
+    try {
+      const runPath = approvedRun(root);
+      const cross = { ...request(), agent: "implementer", workspacePath: root, task: { prompt: "Approved change", runPath } };
+      await expect(manager.delegate(cross)).rejects.toThrow(/workspaceRoot/);
+      expect(runtime.calls).toHaveLength(0);
+      expect(store.listByParent("host-id")).toHaveLength(0);
+      approvedRun(root, { workspaceRoot: root });
+      const result = await manager.delegate(cross);
+      expect(result.session.workspace.cwd).toBe(root);
+      expect(result.session.parentId).toBe("host-id");
+      expect(runtime.calls[0].session.implementation?.root).toBe(root);
+      expect(store.listByParent("host-id")).toHaveLength(1);
+      const reader = await manager.delegate({ ...request(), workspacePath: root });
+      expect(reader.session.workspace.cwd).toBe(root);
+      expect(reader.session.implementation).toBeUndefined();
+      expect(runtime.calls[1].definition.tools).toEqual(["read", "grep", "find", "ls"]);
+    } finally { await manager.shutdown(); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("reports lifecycle progress without persisting callbacks or allowing observer errors to fail execution", async () => {
+    const { manager, store } = setup();
+    const updates: Array<{ id: string; status: string; elapsedMs: number }> = [];
+    const result = await manager.delegate({ ...request(), onProgress: (update) => {
+      updates.push(update);
+      if (update.status === "running") throw new Error("UI unavailable");
+    } });
+    expect(result.status).toBe("completed");
+    expect(updates.some(u => u.status === "running")).toBe(true);
+    expect(updates.at(-1)?.status).toBe("completed");
+    expect(updates.every(u => u.id === result.session.id && u.elapsedMs >= 0)).toBe(true);
+    expect(JSON.stringify(store.get(result.session.id))).not.toContain("onProgress");
+    expect((await manager.delegate({ ...request(), onProgress: async () => { throw new Error("async UI unavailable"); } })).status).toBe("completed");
+  });
+
   it("returns typed failure without killing the manager", async () => {
     const { manager, runtime } = setup();
     runtime.mode = "fail";
